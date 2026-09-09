@@ -765,36 +765,47 @@ export class MongoMemoryReplSet extends EventEmitter implements ManagerAdvanced 
     log('_waitForPrimary: Waiting for a Primary');
     let timeoutId: NodeJS.Timeout | undefined;
 
-    // "race" because not all servers will be a primary
-    await Promise.race([
-      ...this.servers.map(
-        (server) =>
-          new Promise<void>((res, rej) => {
-            const instanceInfo = server.instanceInfo;
+    try {
+      // "race" because not all servers will be a primary
+      await Promise.race([
+        ...this.servers.map(
+          (server) =>
+            new Promise<void>((res, rej) => {
+              const instanceInfo = server.instanceInfo;
 
-            // this should be defined at this point, but is checked anyway (thanks to types)
-            if (isNullOrUndefined(instanceInfo)) {
-              return rej(new InstanceInfoError('_waitForPrimary Primary race'));
-            }
+              // this should be defined at this point, but is checked anyway (thanks to types)
+              if (isNullOrUndefined(instanceInfo)) {
+                return rej(new InstanceInfoError('_waitForPrimary Primary race'));
+              }
 
-            instanceInfo.instance.once(MongoInstanceEvents.instancePrimary, res);
+              instanceInfo.instance.once(MongoInstanceEvents.instancePrimary, res);
 
-            if (instanceInfo.instance.isInstancePrimary) {
-              log('_waitForPrimary: found instance being already primary');
-              res();
-            }
-          })
-      ),
-      new Promise((_res, rej) => {
-        timeoutId = setTimeout(() => {
-          Promise.all([...this.servers.map((v) => v.stop())]); // this is not chained with "rej", this is here just so things like jest can exit at some point
-          rej(new WaitForPrimaryTimeoutError(timeout, where));
-        }, timeout);
-      }),
-    ]);
-
-    if (!isNullOrUndefined(timeoutId)) {
-      clearTimeout(timeoutId);
+              if (instanceInfo.instance.isInstancePrimary) {
+                log('_waitForPrimary: found instance being already primary');
+                res();
+              }
+            })
+        ),
+        new Promise((_res, rej) => {
+          timeoutId = setTimeout(() => {
+            // use the same cleanup options as every other failure path in this file ("still
+            // try to close the instance that was spawned, without cleanup for investigation"),
+            // and catch errors instead of leaving an unhandled rejection; this is not chained
+            // with "rej", this is here just so things like jest can exit at some point
+            Promise.all([
+              ...this.servers.map((v) => v.stop({ doCleanup: false, force: false })),
+            ]).catch((err) => log('_waitForPrimary: background stop after timeout failed:', err));
+            rej(new WaitForPrimaryTimeoutError(timeout, where));
+          }, timeout);
+        }),
+      ]);
+    } finally {
+      // clear the timeout on every path (not just on success), otherwise a rejection from the
+      // per-server race (e.g. "InstanceInfoError") leaves this timer armed against a replSet
+      // that may have already moved on
+      if (!isNullOrUndefined(timeoutId)) {
+        clearTimeout(timeoutId);
+      }
     }
 
     log('_waitForPrimary: detected one primary instance ');
