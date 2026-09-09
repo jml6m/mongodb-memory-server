@@ -848,15 +848,8 @@ describe('MongoMemoryServer', () => {
     });
   });
 
-  // Same shared beforeAll/afterAll shape as getUri() above -- one instance created once and
-  // reused across tests, cleaned up once at the end. This mirrors this project's own documented
-  // usage pattern (docs/guides/integration-examples/test-runners.md: Jest globalSetup /
-  // globalTeardown; mocha before/after; vitest globalSetup) and the FAQ's documented promise
-  // that ".stop()" cleans up a temporary dbPath. Demonstrates that an unexpected mongod crash
-  // between tests -- not simulated by calling this library's own stop(), just an external kill,
-  // the same as an OOM-kill on a resource-constrained CI runner would look -- breaks both: the
-  // afterAll's plain, undefended `.stop()` call throws instead of succeeding, and the temp
-  // directory is never cleaned up.
+  // Mirrors getUri()'s beforeAll/afterAll shape above (this project's documented usage
+  // pattern), simulating an unexpected mongod crash between tests.
   describe('afterAll cleanup after mongod is killed unexpectedly', () => {
     let mongoServer: MongoMemoryServer;
     let dbPath: string;
@@ -866,37 +859,35 @@ describe('MongoMemoryServer', () => {
       dbPath = mongoServer.instanceInfo!.dbPath;
     });
 
-    // unchanged from the getUri() block above -- the plain, documented pattern
+    // unchanged from getUri() above -- the plain, documented pattern
     afterAll(async () => {
       if (mongoServer) {
         await mongoServer.stop();
       }
     });
 
-    // a second afterAll, so this can check what happened after the (failing) one above ran --
-    // Jest still runs every afterAll in a block even if an earlier one throws
+    // consequence 1: was the temp directory actually cleaned up?
     afterAll(async () => {
       expect(await utils.statPath(dbPath)).toBeUndefined();
+    });
+
+    // consequence 2: can the object be recovered by restarting it?
+    afterAll(async () => {
+      await mongoServer.start();
     });
 
     it('mongod is killed unexpectedly between tests', async () => {
       const instance = mongoServer.instanceInfo!.instance;
       const pid = instance.mongodProcess!.pid;
 
-      // Register before killing so the event can't be missed. closeHandler emits
-      // "instanceError" synchronously -- which synchronously kicks off this library's own
-      // internal auto `stop()`, synchronously assigning `stopPromise` before that call's own
-      // first internal await -- strictly before closeHandler goes on to emit "instanceClosed".
-      // So by the time this resolves, `stopPromise` is guaranteed to already be set: a real
-      // invariant of this scenario, not a possible race.
+      // wait for this library's own internal crash-recovery to fully settle first
       const closedPromise = new Promise<void>((resolve) => {
         instance.once(MongoInstanceEvents.instanceClosed, () => resolve());
       });
-
-      process.kill(pid!, 'SIGKILL'); // simulate a crash -- bypasses this library's own stop()
+      process.kill(pid!, 'SIGKILL'); // simulate a crash
       await closedPromise;
       expect(instance.stopPromise).toBeDefined();
-      await instance.stopPromise!; // wait for the internal auto-stop to actually finish
+      await instance.stopPromise!;
     });
   });
 
