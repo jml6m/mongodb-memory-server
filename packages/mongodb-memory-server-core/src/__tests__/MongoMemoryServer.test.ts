@@ -5,7 +5,7 @@ import MongoMemoryServer, {
   MongoMemoryServerEvents,
   MongoMemoryServerStates,
 } from '../MongoMemoryServer';
-import MongoInstance from '../util/MongoInstance';
+import MongoInstance, { MongoInstanceEvents } from '../util/MongoInstance';
 import * as utils from '../util/utils';
 import { InstanceInfoError, StateError } from '../util/errors';
 import { assertIsError } from './testUtils/test_utils';
@@ -845,6 +845,49 @@ describe('MongoMemoryServer', () => {
     it('should return "otherIp" if set', () => {
       const port: number = mongoServer.instanceInfo!.port;
       expect(mongoServer.getUri(undefined, '0.0.0.0')).toStrictEqual(`mongodb://0.0.0.0:${port}/`);
+    });
+  });
+
+  // Mirrors getUri()'s beforeAll/afterAll shape above (this project's documented usage
+  // pattern), simulating an unexpected mongod crash between tests.
+  describe('afterAll cleanup after mongod is killed unexpectedly', () => {
+    let mongoServer: MongoMemoryServer;
+    let dbPath: string;
+
+    beforeAll(async () => {
+      mongoServer = await MongoMemoryServer.create();
+      dbPath = mongoServer.instanceInfo!.dbPath;
+    });
+
+    // unchanged from getUri() above -- the plain, documented pattern
+    afterAll(async () => {
+      if (mongoServer) {
+        await mongoServer.stop();
+      }
+    });
+
+    // consequence 1: was the temp directory actually cleaned up?
+    afterAll(async () => {
+      expect(await utils.statPath(dbPath)).toBeUndefined();
+    });
+
+    // consequence 2: can the object be recovered by restarting it?
+    afterAll(async () => {
+      await mongoServer.start();
+    });
+
+    it('mongod is killed unexpectedly between tests', async () => {
+      const instance = mongoServer.instanceInfo!.instance;
+      const pid = instance.mongodProcess!.pid;
+
+      // wait for this library's own internal crash-recovery to fully settle first
+      const closedPromise = new Promise<void>((resolve) => {
+        instance.once(MongoInstanceEvents.instanceClosed, () => resolve());
+      });
+      process.kill(pid!, 'SIGKILL'); // simulate a crash
+      await closedPromise;
+      expect(instance.stopPromise).toBeDefined();
+      await instance.stopPromise!;
     });
   });
 
